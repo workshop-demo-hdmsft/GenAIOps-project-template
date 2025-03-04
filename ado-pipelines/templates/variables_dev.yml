@@ -1,0 +1,6 @@
+variables:
+  AZURE_ENV_NAME: "rg-path2prod-ipcreation"
+  AZURE_OPENAI_ENDPOINT: "https://your-openai-instance.openai.azure.com/"
+  AZURE_SERVICE_CONNECTION_NAME: "Azure-Connection-Dev"
+  AZURE_LOCATION: "uksouth"
+  MANUAL_PROVISIONING: "false"

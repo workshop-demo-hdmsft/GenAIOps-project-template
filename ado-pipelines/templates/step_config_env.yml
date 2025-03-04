@@ -1,0 +1,65 @@
+parameters:
+  azureServiceConnectionName: ''
+  azureEnvName: ''
+  azureSubscriptionId: ''
+  azureLocation: ''
+  manualProvisioning: ''
+  
+steps:
+- bash: |
+    if [ -z "${{ parameters.azureEnvName }}" ] || [ -z "${{ parameters.azureCredentials }}" ] || [ -z "${{ parameters.azureSubscriptionId }}" ] || [ -z "${{ parameters.azureLocation }}" ]; then 
+      echo "Make sure azureEnvName, azureSubscriptionId, azureLocation and azureCredentials are set."
+      exit 1
+    else
+        echo "azureEnvName is set to ${{ parameters.azureEnvName }}"
+        export AZURE_DEV_COLLECT_TELEMETRY=no         
+    fi  
+  displayName: "Check env variables"
+
+- task: Azure/setup-azd@v1.0.0
+  displayName: "Setup Azure Developer CLI"
+
+- task: AzureCLI@2
+  displayName: "Get Azure Login Details"
+  inputs:
+    azureSubscription: ${{ parameters.azureServiceConnectionName }}
+    addSpnToEnvironment: true
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+       echo "##vso[task.setvariable variable=SERVICE_PRINICPAL_CLIENT_ID]$servicePrincipalId" 
+       echo "##vso[task.setvariable variable=SERVICE_PRINICPAL_FEDERATED_TOKEN]$idToken"
+       echo "##vso[task.setvariable variable=SERVICE_PRINICPAL_TENANT_ID]$tenantId"
+         
+- bash: |
+    az login --service-principal -u $(SERVICE_PRINICPAL_CLIENT_ID) --tenant $(SERVICE_PRINICPAL_TENANT_ID) --allow-no-subscriptions --federated-token $(SERVICE_PRINICPAL_FEDERATED_TOKEN)
+  displayName: "Login to Azure"
+
+- bash: |
+
+    # subid="${{ parameters.azureSubscriptionId }}"
+    scope="/subscriptions/${{ parameters.azureSubscriptionId }}/resourceGroups/${{ parameters.azureEnvName }}"
+
+    # Assign roles
+    roles=(
+    '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1'  # Storage Blob Data Reader
+    '8311e382-0749-4cb8-b61a-304f252e45ec'  # ACR Push Role
+    '7f951dda-4ed3-4680-a7ca-43fe172d538d'  # ACR Pull Role
+    '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'  # Cognitive Services OpenAI User
+    'f6c7c914-8db3-469d-8ca1-694a8f32e121'  # Data Scientist
+    'ea01e6af-a1c1-4350-9563-ad00f8c72ec5'  # Secrets Reader
+    '8ebe5a00-799e-43f5-93ac-243d3dce84a7'  # Search Index Data Contributor
+    '7ca78c08-252a-4471-8644-bb5ff32d4ba0'  # Search Service Contributor
+    '64702f94-c441-49e6-a78b-ef80e0188fee'  # Azure AI Developer
+    )
+
+    
+    for roleId in "${roles[@]}"; do
+    az role assignment create \
+      --assignee-object-id "$principalId" \
+      --assignee-principal-type "ServicePrincipal" \
+      --role "$roleId" \
+      --scope "$scope"
+    done
+
+  displayName: "Set permissions for service principal"

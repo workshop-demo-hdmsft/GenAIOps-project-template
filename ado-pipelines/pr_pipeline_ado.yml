@@ -1,9 +1,145 @@
-trigger:
-- none
+trigger: none
 
-pool:
-  vmImage: ubuntu-latest
+variables:
+  - template: templates/variables_dev.yml
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+jobs:
+- deployment: ConfigEnvDeployment
+  displayName: "Configure Environment"
+  condition: ne(variables['Build.Repository.Name'], 'Azure/GenAIOps-project-template')
+  environment: dev
+  
+  pool:
+    vmImage: "ubuntu-latest"
+  
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+          - checkout: self
+          - template: templates/step_config_env.yml
+            parameters:
+              azureServiceConnectionName: $(AZURE_SERVICE_CONNECTION_NAME)
+              azureEnvName: $(AZURE_ENV_NAME)
+              azureSubscriptionId: $(AZURE-SUBSCRIPTION-ID)
+              azureLocation: $(AZURE_LOCATION)
+              manualProvisioning: $(MANUAL_PROVISIONING)
+             
+
+- deployment: UnitTestingDeployment
+  displayName: "Run Unit Tests"
+  dependsOn: ConfigEnvDeployment
+  condition: ne(variables['Build.Repository.Name'], 'Azure/GenAIOps-project-template')
+  environment: dev
+  pool:
+    vmImage: "ubuntu-latest"
+ 
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+          - checkout: self
+          - task: AzureCLI@2
+            displayName: "Login to Azure CLI"
+            inputs:
+              azureSubscription: $(AZURE_CREDENTIALS)
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "3.11"
+            displayName: "Setup Python 3.11"
+          - script: |
+              python -m pip install --upgrade pip
+              pip install pytest
+              pip install -r requirements.txt
+            displayName: "Install dependencies"
+          - script: |
+              pytest tests/ --doctest-modules --junitxml=junit/test-results-3.11.xml
+            displayName: "Run pytest"
+            env:
+              PYTHONPATH: "src"
+              PYTHONWARNINGS: "ignore::DeprecationWarning,ignore::RemovedInMarshmallow4Warning"
+              AZURE_RESOURCE_GROUP: $(AZURE_RESOURCE_GROUP)
+              AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+              AZUREAI_PROJECT_NAME: $(AZUREAI_PROJECT_NAME)
+              AZURE_OPENAI_CHAT_DEPLOYMENT: $(AZURE_OPENAI_CHAT_DEPLOYMENT)
+          - task: PublishTestResults@2
+            displayName: "Publish test results"
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: "junit/test-results-3.11.xml"
+              testRunTitle: "pytest results"
+
+- deployment: StaticCodeAnalysisDeployment
+  displayName: "Static Code Analysis"
+  dependsOn: UnitTestingDeployment
+  environment: dev
+  pool:
+    vmImage: "ubuntu-latest"
+  
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+          - script: echo "Run Pylint"
+            displayName: "Finding anti-patterns in code"
+          - script: echo "Run Bandit"
+            displayName: "Run security checks"
+
+- deployment: EvaluateFlowDeployment
+  displayName: "Evaluate AI Prompts"
+  dependsOn:
+    - ConfigEnvDeployment
+    - UnitTestingDeployment
+    - StaticCodeAnalysisDeployment
+  environment: dev
+  pool:
+    vmImage: "ubuntu-latest"
+  
+  strategy:
+    runOnce:
+      deploy:
+        steps:
+          - checkout: self
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "3.11"
+            displayName: "Setup Python 3.11"
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: "Install dependencies"
+          - task: AzureCLI@2
+            displayName: "Login to Azure CLI"
+            inputs:
+              azureSubscription: $(AZURE_CREDENTIALS)
+          - script: |
+              echo "Run AI-Based prompt evaluation"
+              required_envs=("AZURE_SUBSCRIPTION_ID" "AZURE_LOCATION" "AZURE_RESOURCE_GROUP" "AZURE_OPENAI_NAME" "AZURE_OPENAI_ENDPOINT" "AZURE_SEARCH_ENDPOINT" "AZURE_OPENAI_EMBEDDING_DEPLOYMENT" "AZURE_OPENAI_CHAT_DEPLOYMENT" "AZURE_OPENAI_EMBEDDING_MODEL" "AZURE_OPENAI_API_VERSION" "AZUREAI_PROJECT_NAME")
+              for env_var in "${required_envs[@]}"; do
+                if [ -z "${!env_var}" ]; then
+                  echo "Env variable $env_var is needed but not set. Exiting."
+                  exit 1
+                fi
+              done
+              export AZURE_OPENAI_API_KEY=$(az cognitiveservices account keys list --resource-group ${AZURE_RESOURCE_GROUP} --name ${AZURE_OPENAI_NAME} --query "key1" --output tsv)
+              export PYTHONPATH=./src:$PYTHONPATH
+              python evaluations/prompty_eval.py
+            displayName: "Evaluate prompts"
+            env:
+              AZURE_RESOURCE_GROUP: $(AZURE_RESOURCE_GROUP)
+              AZURE_OPENAI_NAME: $(AZURE_OPENAI_NAME)
+              AZURE_SUBSCRIPTION_ID: $(AZURE_SUBSCRIPTION_ID)
+              AZURE_LOCATION: $(AZURE_LOCATION)
+              AZURE_OPENAI_ENDPOINT: $(AZURE_OPENAI_ENDPOINT)
+              AZURE_SEARCH_ENDPOINT: $(AZURE_SEARCH_ENDPOINT)
+              AZURE_OPENAI_EMBEDDING_DEPLOYMENT: $(AZURE_OPENAI_EMBEDDING_DEPLOYMENT)
+              AZURE_OPENAI_CHAT_DEPLOYMENT: $(AZURE_OPENAI_CHAT_DEPLOYMENT)
+              AZURE_OPENAI_EMBEDDING_MODEL: $(AZURE_OPENAI_EMBEDDING_MODEL)
+              AZURE_OPENAI_API_VERSION: $(AZURE_OPENAI_API_VERSION)
+              AZUREAI_PROJECT_NAME: $(AZUREAI_PROJECT_NAME)
+            shell: bash
+          - task: PublishBuildArtifacts@1
+            displayName: "Upload evaluation results"
+            inputs:
+              PathtoPublish: "prompty-answer-score-eval.xlsx"
+              ArtifactName: "prompt-eval-results"
