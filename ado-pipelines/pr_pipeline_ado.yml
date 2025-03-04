@@ -1,5 +1,13 @@
 trigger: none
 
+pr:
+  branches:
+    include:
+      -  dev
+  paths:
+    exclude:
+      - '*.yml'
+      - '*.md'
 variables:
   - template: templates/variables_dev.yml
 
